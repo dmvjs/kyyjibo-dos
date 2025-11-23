@@ -173,12 +173,38 @@ export class HamiltonianPlayer {
 
   /**
    * Async initialization to shuffle songs with quantum randomness.
+   * Also selects random starting key and tempo using quantum randomness.
    * Call this after construction and await it before using the player.
    */
   async init(): Promise<void> {
     // Shuffle the Hamiltonian path with true randomness
     this.hamiltonianPath = await this.shuffleSongs([...this.songs]);
     console.log('🎲 Hamiltonian path shuffled with quantum randomness');
+
+    // Select random starting key (1-10) and tempo using quantum randomness
+    const VALID_KEYS: Key[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const randomKey = await this.qrng.getChoice(VALID_KEYS);
+    const randomTempo = await this.qrng.getChoice(ALL_TEMPOS);
+
+    console.log(`🎲 Quantum random start: Key ${randomKey}, ${randomTempo} BPM`);
+
+    // Regenerate progression from random starting point
+    this.progression = this.generateProgressionFromPoint(randomKey, randomTempo);
+    this.progressIndex = 0;
+
+    const currentEntry = this.progression[this.progressIndex];
+    if (!currentEntry) {
+      throw new Error('Failed to generate progression - no entries available');
+    }
+
+    // Update state with random starting point
+    this.updateState({
+      key: currentEntry.key,
+      tempo: currentEntry.tempo,
+      progressIndex: this.progressIndex,
+    });
+
+    console.log(`✅ Player initialized: Key ${currentEntry.key}, ${currentEntry.tempo} BPM`);
   }
 
   /**
@@ -1026,8 +1052,8 @@ export class HamiltonianPlayer {
 
           // Set up interval to continue switching every 16 beats (4 bars)
           this.hiddenTrackSwitchInterval = window.setInterval(() => {
-            // Only switch if MF mode is ON
-            if (!this.mannieFreshMode) {
+            // Only switch if MF mode is ON and player is actively playing
+            if (!this.mannieFreshMode || !this.state.isPlaying) {
               return;
             }
 
@@ -1040,8 +1066,8 @@ export class HamiltonianPlayer {
               activeHiddenTrack: this.mannieFreshMode ? this.currentHiddenTrack : null,
             });
 
-            console.log(`🔄 Mannie Fresh: Switched to hidden track ${this.currentHiddenTrack}`);
-          }, fourBarDuration * 1000); // Switch every 16 beats (4 bars)
+            console.log(`🔄 Mannie Fresh: Switched to hidden track ${this.currentHiddenTrack} at beat boundary`);
+          }, fourBarDuration * 1000); // Switch every 16 beats (4 bars) - perfectly divisible fault lines
         }, Math.max(0, firstSwitchDelay));
       }
 
@@ -1093,6 +1119,16 @@ export class HamiltonianPlayer {
   private clearScheduled(): void {
     this.scheduledTimeouts.forEach((id) => clearTimeout(id));
     this.scheduledTimeouts = [];
+
+    // Clear Mannie Fresh mode switching timers
+    if (this.hiddenTrackSwitchTimeout !== null) {
+      clearTimeout(this.hiddenTrackSwitchTimeout);
+      this.hiddenTrackSwitchTimeout = null;
+    }
+    if (this.hiddenTrackSwitchInterval !== null) {
+      clearInterval(this.hiddenTrackSwitchInterval);
+      this.hiddenTrackSwitchInterval = null;
+    }
   }
 
   /**
