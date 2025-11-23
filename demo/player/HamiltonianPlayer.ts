@@ -1035,23 +1035,16 @@ export class HamiltonianPlayer {
         }
 
         // Calculate when to start switching (when main section begins)
-        const firstSwitchDelay = (mainStartTime - ctx.currentTime) * 1000;
+        const firstSwitchTime = mainStartTime;
 
-        // Set up switching to start when main section begins
-        // One track plays throughout intro, then switches at main start, then every 16 beats
-        this.hiddenTrackSwitchTimeout = window.setTimeout(() => {
-          if (!this.state.isPlaying) return;
+        // Recursive function to schedule switches based on audio time (sample-accurate)
+        const scheduleNextSwitch = (nextSwitchTime: number): void => {
+          if (!this.audioContext) return;
 
-          // Switch to the other track when main starts
-          this.currentHiddenTrack = this.currentHiddenTrack === 3 ? 4 : 3;
-          this.updateHiddenTrackGains();
-          this.updateState({
-            activeHiddenTrack: this.mannieFreshMode ? this.currentHiddenTrack : null,
-          });
-          console.log(`🔄 Mannie Fresh: Main started, switched to track ${this.currentHiddenTrack}`);
+          const now = this.audioContext.currentTime;
+          const delay = Math.max(0, (nextSwitchTime - now) * 1000);
 
-          // Set up interval to continue switching every 16 beats (4 bars)
-          this.hiddenTrackSwitchInterval = window.setInterval(() => {
+          this.hiddenTrackSwitchTimeout = window.setTimeout(() => {
             // Only switch if MF mode is ON and player is actively playing
             if (!this.mannieFreshMode || !this.state.isPlaying) {
               return;
@@ -1066,9 +1059,17 @@ export class HamiltonianPlayer {
               activeHiddenTrack: this.mannieFreshMode ? this.currentHiddenTrack : null,
             });
 
-            console.log(`🔄 Mannie Fresh: Switched to hidden track ${this.currentHiddenTrack} at beat boundary`);
-          }, fourBarDuration * 1000); // Switch every 16 beats (4 bars) - perfectly divisible fault lines
-        }, Math.max(0, firstSwitchDelay));
+            const switchType = nextSwitchTime === firstSwitchTime ? 'Main started' : 'Beat boundary';
+            console.log(`🔄 Mannie Fresh: ${switchType}, switched to track ${this.currentHiddenTrack}`);
+
+            // Schedule next switch 16 beats (4 bars) later - based on AUDIO time
+            const nextTime = nextSwitchTime + fourBarDuration;
+            scheduleNextSwitch(nextTime);
+          }, delay);
+        };
+
+        // Start the switching chain at main section start
+        scheduleNextSwitch(firstSwitchTime);
       }
 
     } catch (err) {

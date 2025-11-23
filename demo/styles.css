@@ -496,6 +496,102 @@ input:focus + .slider {
   text-overflow: ellipsis;
 }
 
+/* Mobile optimizations for narrow screens (iPhone portrait) */
+@media (max-width: 428px) {
+  /* Reduce padding on strips */
+  .strip {
+    padding: 8px 8px;
+    gap: 4px;
+  }
+
+  .strip-buttons {
+    gap: 4px;
+  }
+
+  /* More compact buttons */
+  .strip-btn {
+    padding: 6px 8px;
+    font-size: 10px;
+    min-height: 28px;
+  }
+
+  /* More compact toggle containers */
+  .mf-toggle-container {
+    gap: 6px;
+    padding-left: 8px !important;
+  }
+
+  .mf-label {
+    font-size: 9px;
+  }
+
+  /* Smaller switches */
+  .switch {
+    width: 36px;
+    height: 20px;
+  }
+
+  .slider:before {
+    height: 14px;
+    width: 14px;
+    left: 3px;
+    bottom: 3px;
+  }
+
+  input:checked + .slider:before {
+    transform: translateX(16px);
+  }
+}
+
+/* Extra small screens (iPhone SE, etc) */
+@media (max-width: 375px) {
+  .strip {
+    gap: 3px;
+    padding: 6px 6px;
+  }
+
+  .strip-buttons {
+    gap: 3px;
+  }
+
+  .strip-btn {
+    padding: 4px 6px;
+    font-size: 9px;
+    min-height: 26px;
+  }
+
+  .strip-label {
+    font-size: 9px;
+    padding: 4px 6px;
+  }
+
+  .mf-toggle-container {
+    gap: 4px;
+    padding-left: 6px !important;
+  }
+
+  .mf-label {
+    font-size: 8px;
+  }
+
+  /* Even smaller switches */
+  .switch {
+    width: 32px;
+    height: 18px;
+  }
+
+  .slider:before {
+    height: 12px;
+    width: 12px;
+    left: 3px;
+    bottom: 3px;
+  }
+
+  input:checked + .slider:before {
+    transform: translateX(14px);
+  }
+}
+
 /* Ensure everything fits - keep buttons large for mobile */
 @media (max-height: 800px) {
   .track-section {

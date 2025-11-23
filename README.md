@@ -25,6 +25,43 @@ A Hamiltonian path visits every node in a graph exactly once. In Kwyjibo, each s
 - 🎛️ **Real-time Controls** - All changes apply instantly without interruption
 - 🎵 **273 Hip-Hop Instrumentals** - Beat-gridded and key-tagged library
 
+## Artistic Philosophy
+
+Kwyjibo v2 is an exploration of **generative music** and **computational creativity**. Rather than replacing human artistry, it asks: *What becomes possible when we remove human bias and let quantum physics make decisions?*
+
+### Creative Intent
+
+This system is a **quantum generative artist** - it creates music by exploring possibility spaces that human cognition cannot reach. Every session is a unique journey through 273 songs, with combinations that will never repeat and paths that were never consciously chosen.
+
+The design follows principles established by pioneers of generative art:
+- **Brian Eno's** ambient systems: "Set into motion something that will behave in unpredictable ways"
+- **John Cage's** chance operations: "Stop thinking and let things happen"
+- **Sol LeWitt's** conceptual art: The system itself is the artwork
+
+### Why Quantum Randomness?
+
+Pseudo-random algorithms are deterministic - they follow patterns that can be predicted. Human DJs have taste and bias - they make choices based on what they know works. **Quantum randomness is different.** It uses physical phenomena (quantum vacuum fluctuations) to make decisions that are fundamentally unpredictable and unbiased.
+
+This isn't about being "better" than human DJs. It's about **discovery** - finding combinations that would never occur to anyone, because no one is "trying" to create them.
+
+### The Constraints Define The Art
+
+- **Hamiltonian Path**: Mathematical guarantee that no combination repeats
+- **Music Theory**: Key relationships (5ths, 4ths, relative modes) guide harmonic exploration
+- **Progression Formula**: 10 keys at each tempo creates rhythmic structure
+- **808 Mode**: Frequency splitting and recombination creates emergent sounds
+- **Sample-Accurate Timing**: Perfect execution removes human error from the equation
+
+These aren't limitations - they're **aesthetic choices** that shape how the system explores musical space. The art is in the system design, not the individual mixes it creates.
+
+### What This Is
+
+Kwyjibo is an **infinite radio station from the quantum multiverse**. It never stops, never repeats, and never compromises. It explores the full possibility space of 273 hip-hop instrumentals using physics and mathematics as creative tools.
+
+It's not trying to read the room, build a narrative, or serve an audience. It's discovering what happens when you let quantum dice and music theory constraints collide for eternity.
+
+Some will hear chaos. Others will hear pure creative exploration. Both are correct.
+
 ## Quick Start
 
 ```bash
@@ -237,9 +274,43 @@ Set via environment variable:
 VITE_MUSIC_BASE_URL=https://cdn.example.com/music/ npm run dev
 ```
 
+## Legal Notice
+
+**IMPORTANT: Music Ownership and Copyright**
+
+Kwyjibo v2 is a music player and mixing tool. **It does not include, provide, or distribute any copyrighted music files.**
+
+### User Responsibility
+
+By using this software, you agree that:
+
+1. **You must legally own or have licenses for all music files you use with this software**
+2. **You are solely responsible for ensuring you have the legal right to use any audio files**
+3. **Private listening of legally owned music is typically permitted under copyright law**
+4. **This software is intended for personal, non-commercial use with legally obtained music**
+
+### What This Means
+
+- ✅ **Legal**: Using Kwyjibo with music you've purchased, licensed, or own
+- ✅ **Legal**: Private listening and personal enjoyment of your own music collection
+- ✅ **Legal**: Using Kwyjibo as a creative tool for music you have rights to
+- ❌ **Illegal**: Using pirated or unlicensed music files
+- ❌ **Illegal**: Public performance or broadcasting without proper licenses
+- ❌ **Illegal**: Commercial use without appropriate rights and licenses
+
+### Developer Disclaimer
+
+The developers of Kwyjibo:
+- Do not provide, distribute, or condone the use of pirated music
+- Are not responsible for how users obtain or use music files
+- Provide this software as a tool only - users are responsible for legal compliance
+- Recommend using music from legal sources (purchased downloads, streaming service downloads with offline rights, etc.)
+
+**Use this software responsibly and respect artists' rights.**
+
 ## License
 
-MIT
+MIT (Software License - Does not grant any rights to copyrighted music)
 
 ## Credits
 
