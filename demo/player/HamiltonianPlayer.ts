@@ -55,6 +55,8 @@ export interface Track {
 export interface TrackPair {
   track1: Track;
   track2: Track;
+  track3?: Track; // Mannie Fresh mode hidden track
+  track4?: Track; // Mannie Fresh mode hidden track
   key: Key;
   tempo: Tempo;
 }
@@ -72,6 +74,8 @@ export interface PlayerState {
   progressIndex: number;
   canSkipBack: boolean;
   canSkipForward: boolean;
+  mannieFreshMode: boolean;
+  activeHiddenTrack: 3 | 4 | null; // Which MF track is currently playing
 }
 
 /**
@@ -112,7 +116,15 @@ export class HamiltonianPlayer {
   private preloadedBuffers: Map<string, AudioBuffer> = new Map(); // Preloaded audio for next pair
   private track1Gain: GainNode | null = null; // Gain node for track 1 (A)
   private track2Gain: GainNode | null = null; // Gain node for track 2 (B)
+  private track3Gain: GainNode | null = null; // Gain node for hidden track 3 (C) - Mannie Fresh mode
+  private track4Gain: GainNode | null = null; // Gain node for hidden track 4 (D) - Mannie Fresh mode
+  private masterCompressor: DynamicsCompressorNode | null = null; // Master compressor for arena sound
   private crossfaderPosition: number = 0.5; // 0 = all A, 0.5 = center, 1 = all B
+  private mannieFreshMode: boolean = false; // Enable hidden tracks that alternate every 4 bars
+  private mannieFreshVolume: number = 0.66; // Volume for MF tracks (0-1), default 66%
+  private currentHiddenTrack: 3 | 4 = 3; // Which hidden track is currently playing (3 or 4)
+  private hiddenTrackSwitchInterval: number | null = null; // Interval for switching hidden tracks
+  private hiddenTrackSwitchTimeout: number | null = null; // Timeout that sets up the interval
   private playedSongIds: Set<number> = new Set(); // Track which songs have been played
   private nextPairScheduledTime: number = 0; // When next pair is scheduled to start
   private scheduledPairsCount: number = 0; // Track how many pairs are scheduled ahead
@@ -158,6 +170,8 @@ export class HamiltonianPlayer {
       progressIndex: this.progressIndex,
       canSkipBack: false,
       canSkipForward: true,
+      mannieFreshMode: false,
+      activeHiddenTrack: null,
     };
   }
 
@@ -329,16 +343,34 @@ export class HamiltonianPlayer {
     if (!this.audioContext) {
       this.audioContext = new AudioContext();
 
+      // Create master compressor for arena sound (punchy, loud, controlled)
+      this.masterCompressor = this.audioContext.createDynamicsCompressor();
+      this.masterCompressor.threshold.setValueAtTime(-24, this.audioContext.currentTime);
+      this.masterCompressor.knee.setValueAtTime(30, this.audioContext.currentTime);
+      this.masterCompressor.ratio.setValueAtTime(12, this.audioContext.currentTime);
+      this.masterCompressor.attack.setValueAtTime(0.003, this.audioContext.currentTime);
+      this.masterCompressor.release.setValueAtTime(0.25, this.audioContext.currentTime);
+      this.masterCompressor.connect(this.audioContext.destination);
+
       // Create gain nodes for crossfading
       this.track1Gain = this.audioContext.createGain();
       this.track2Gain = this.audioContext.createGain();
 
-      // Connect gain nodes to destination
-      this.track1Gain.connect(this.audioContext.destination);
-      this.track2Gain.connect(this.audioContext.destination);
+      // Create gain nodes for hidden tracks (Mannie Fresh mode)
+      this.track3Gain = this.audioContext.createGain();
+      this.track4Gain = this.audioContext.createGain();
+
+      // Connect all gain nodes through the master compressor
+      this.track1Gain.connect(this.masterCompressor);
+      this.track2Gain.connect(this.masterCompressor);
+      this.track3Gain.connect(this.masterCompressor);
+      this.track4Gain.connect(this.masterCompressor);
 
       // Set initial crossfader position (center)
       this.updateCrossfaderGains();
+
+      // Set hidden tracks to silent by default (will be controlled by Mannie Fresh mode)
+      this.updateHiddenTrackGains();
     }
     return this.audioContext;
   }
@@ -374,6 +406,346 @@ export class HamiltonianPlayer {
    */
   getCrossfader(): number {
     return this.crossfaderPosition;
+  }
+
+  /**
+   * Update gain values for hidden tracks (Mannie Fresh mode).
+   * Track 3 and 4 alternate every 4 bars at configured volume when enabled.
+   */
+  private updateHiddenTrackGains(): void {
+    if (!this.track3Gain || !this.track4Gain || !this.audioContext) return;
+
+    const now = this.audioContext.currentTime;
+
+    if (this.mannieFreshMode) {
+      // Apply volume setting to the active hidden track, silent for the inactive one
+      const gain3 = this.currentHiddenTrack === 3 ? this.mannieFreshVolume : 0;
+      const gain4 = this.currentHiddenTrack === 4 ? this.mannieFreshVolume : 0;
+
+      this.track3Gain.gain.setTargetAtTime(gain3, now, 0.015);
+      this.track4Gain.gain.setTargetAtTime(gain4, now, 0.015);
+    } else {
+      // Silent when mode is off
+      this.track3Gain.gain.setTargetAtTime(0, now, 0.015);
+      this.track4Gain.gain.setTargetAtTime(0, now, 0.015);
+    }
+  }
+
+  /**
+   * Calculate 4-bar duration in seconds based on current tempo.
+   * 4 bars = 16 beats in 4/4 time (for MF switching)
+   */
+  private calculate4BarDuration(tempo: Tempo): number {
+    const secondsPerBeat = 60 / tempo;
+    return 16 * secondsPerBeat; // 4 bars × 4 beats/bar = 16 beats
+  }
+
+  /**
+   * Get a musically related key using various harmonic relationships.
+   * Uses circle of fifths, parallel modes, relative keys, and other theory.
+   */
+  private getMusicallyRelatedKey(baseKey: Key): Key {
+    const relationships = [
+      7,   // Perfect 5th up (dominant)
+      5,   // Perfect 4th up (subdominant)
+      -7,  // Perfect 5th down
+      -5,  // Perfect 4th down
+      3,   // Relative minor/major (minor 3rd)
+      -3,  // Relative minor/major (minor 3rd down)
+      6,   // Tritone (devil's interval)
+      2,   // Whole step up (pentatonic relation)
+      -2,  // Whole step down
+      4,   // Major 3rd (mediant)
+      -4,  // Major 3rd down
+    ];
+
+    // Pick a random relationship
+    const relationship = relationships[Math.floor(Math.random() * relationships.length)];
+
+    // Calculate new key (mod 12 for octave wrap, +1 because keys are 1-indexed)
+    let newKey = ((baseKey - 1 + relationship) % 12);
+    if (newKey < 0) newKey += 12;
+
+    // Ensure we stay within the valid key range (1-10)
+    return (Math.max(1, Math.min(10, newKey + 1))) as Key;
+  }
+
+  /**
+   * Toggle Mannie Fresh mode on/off.
+   * When enabled, two hidden tracks play at full volume, alternating every 8 bars.
+   */
+  toggleMannieFreshMode(): void {
+    this.mannieFreshMode = !this.mannieFreshMode;
+    this.updateHiddenTrackGains();
+    this.updateState({
+      mannieFreshMode: this.mannieFreshMode,
+      activeHiddenTrack: this.mannieFreshMode ? this.currentHiddenTrack : null,
+    });
+
+    if (this.mannieFreshMode) {
+      console.log('🎵 Mannie Fresh mode ACTIVATED - Tracks will alternate every 8 beats');
+    } else {
+      console.log('🎵 Mannie Fresh mode DEACTIVATED');
+    }
+
+    // Note: Switching is handled by the beat-synced interval set up when the pair starts.
+    // No need to create a new interval here - just let the existing one handle it.
+  }
+
+  /**
+   * Get current Mannie Fresh mode state.
+   */
+  getMannieFreshMode(): boolean {
+    return this.mannieFreshMode;
+  }
+
+  /**
+   * Set Mannie Fresh volume (0-1).
+   */
+  setMannieFreshVolume(volume: number): void {
+    this.mannieFreshVolume = Math.max(0, Math.min(1, volume));
+    this.updateHiddenTrackGains();
+  }
+
+  /**
+   * Get current Mannie Fresh volume.
+   */
+  getMannieFreshVolume(): number {
+    return this.mannieFreshVolume;
+  }
+
+  /**
+   * Schedule hidden tracks for a scheduled pair (used in scheduleNextPair).
+   */
+  private async scheduleHiddenTracksForScheduledPair(
+    pair: TrackPair,
+    pairStartTime: number,
+    pairEndTime: number
+  ): Promise<void> {
+    // Add tracks to pair if not already present
+    if (!pair.track3 || !pair.track4) {
+      const relatedKey3 = this.getMusicallyRelatedKey(pair.key);
+      const relatedKey4 = this.getMusicallyRelatedKey(pair.key);
+
+      const song3 = this.getNextSong(pair.tempo, [
+        pair.track1.song.artist,
+        pair.track2.song.artist,
+      ]);
+      const song4 = this.getNextSong(pair.tempo, [
+        pair.track1.song.artist,
+        pair.track2.song.artist,
+        song3.artist,
+      ]);
+
+      pair.track3 = this.createTrack(song3, relatedKey3, pair.tempo);
+      pair.track4 = this.createTrack(song4, relatedKey4, pair.tempo);
+    }
+
+    // Calculate mainStartTime using the same logic as playPair
+    const intro1Duration = pair.track1.introDuration;
+    const intro2Duration = pair.track2.introDuration;
+    const idealIntroDuration = Math.max(intro1Duration, intro2Duration);
+    const mainStartTime = pairStartTime + idealIntroDuration;
+
+    // Now schedule the audio using the existing method
+    await this.scheduleHiddenTracks(pair, pairStartTime, mainStartTime, pairEndTime);
+  }
+
+  /**
+   * Schedule hidden tracks (Mannie Fresh mode).
+   * Picks songs in musically related keys and alternates them every 4 bars.
+   */
+  private async scheduleHiddenTracks(
+    pair: TrackPair,
+    pairStartTime: number,
+    mainStartTime: number,
+    pairEndTime: number,
+    isCurrentPair: boolean = false,
+    preloadedBuffers?: {
+      intro3Buffer: AudioBuffer;
+      main3Buffer: AudioBuffer;
+      intro4Buffer: AudioBuffer;
+      main4Buffer: AudioBuffer;
+    }
+  ): Promise<void> {
+    try {
+      const ctx = this.ensureAudioContext();
+
+      // Only clear the interval if this is the current pair starting playback
+      // Don't clear it when pre-scheduling the next pair
+      if (isCurrentPair && this.hiddenTrackSwitchInterval !== null) {
+        clearInterval(this.hiddenTrackSwitchInterval);
+      }
+
+      // Only create tracks if they don't already exist (they might be pre-created)
+      if (!pair.track3 || !pair.track4) {
+        // Pick two songs in musically related keys
+        const relatedKey3 = this.getMusicallyRelatedKey(pair.key);
+        const relatedKey4 = this.getMusicallyRelatedKey(pair.key);
+
+        // Get songs for hidden tracks (avoid songs already playing)
+        const song3 = this.getNextSong(pair.tempo, [
+          pair.track1.song.artist,
+          pair.track2.song.artist,
+        ]);
+        const song4 = this.getNextSong(pair.tempo, [
+          pair.track1.song.artist,
+          pair.track2.song.artist,
+          song3.artist,
+        ]);
+
+        // Create tracks for hidden songs
+        const track3 = this.createTrack(song3, relatedKey3, pair.tempo);
+        const track4 = this.createTrack(song4, relatedKey4, pair.tempo);
+
+        // Add tracks to the current pair for UI display
+        pair.track3 = track3;
+        pair.track4 = track4;
+      }
+
+      const track3 = pair.track3!;
+      const track4 = pair.track4!;
+
+      console.log(
+        `🎵 Mannie Fresh: Track 3: ${track3.song.title} (${track3.song.artist}) in key ${track3.key}`
+      );
+      console.log(
+        `🎵 Mannie Fresh: Track 4: ${track4.song.title} (${track4.song.artist}) in key ${track4.key}`
+      );
+
+      // Load audio for both hidden tracks (unless already provided)
+      let intro3Buffer: AudioBuffer, main3Buffer: AudioBuffer, intro4Buffer: AudioBuffer, main4Buffer: AudioBuffer;
+      if (preloadedBuffers) {
+        // Use pre-loaded buffers for perfect alignment
+        intro3Buffer = preloadedBuffers.intro3Buffer;
+        main3Buffer = preloadedBuffers.main3Buffer;
+        intro4Buffer = preloadedBuffers.intro4Buffer;
+        main4Buffer = preloadedBuffers.main4Buffer;
+      } else {
+        // Load buffers now (for scheduled pairs)
+        [intro3Buffer, main3Buffer, intro4Buffer, main4Buffer] = await Promise.all([
+          this.loadAudioBuffer(track3.introUrl),
+          this.loadAudioBuffer(track3.mainUrl),
+          this.loadAudioBuffer(track4.introUrl),
+          this.loadAudioBuffer(track4.mainUrl),
+        ]);
+      }
+
+      // Use the exact same timing as main tracks (passed as parameter)
+
+      // Schedule Track 3 (intro + main)
+      const intro3Source = ctx.createBufferSource();
+      intro3Source.buffer = intro3Buffer;
+      intro3Source.connect(this.track3Gain!);
+      intro3Source.start(pairStartTime);
+      console.log(`▶️ Started Track 3 intro at ${pairStartTime}`);
+      intro3Source.onended = () => {
+        intro3Source.disconnect();
+        const idx = this.currentSources.indexOf(intro3Source);
+        if (idx > -1) this.currentSources.splice(idx, 1);
+      };
+      this.currentSources.push(intro3Source);
+
+      const main3Source = ctx.createBufferSource();
+      main3Source.buffer = main3Buffer;
+      main3Source.connect(this.track3Gain!);
+      main3Source.start(mainStartTime);
+      console.log(`▶️ Scheduled Track 3 main at ${mainStartTime}`);
+      main3Source.onended = () => {
+        main3Source.disconnect();
+        const idx = this.currentSources.indexOf(main3Source);
+        if (idx > -1) this.currentSources.splice(idx, 1);
+      };
+      this.currentSources.push(main3Source);
+
+      // Schedule Track 4 (intro + main)
+      const intro4Source = ctx.createBufferSource();
+      intro4Source.buffer = intro4Buffer;
+      intro4Source.connect(this.track4Gain!);
+      intro4Source.start(pairStartTime);
+      console.log(`▶️ Started Track 4 intro at ${pairStartTime}`);
+      intro4Source.onended = () => {
+        intro4Source.disconnect();
+        const idx = this.currentSources.indexOf(intro4Source);
+        if (idx > -1) this.currentSources.splice(idx, 1);
+      };
+      this.currentSources.push(intro4Source);
+
+      const main4Source = ctx.createBufferSource();
+      main4Source.buffer = main4Buffer;
+      main4Source.connect(this.track4Gain!);
+      main4Source.start(mainStartTime);
+      console.log(`▶️ Scheduled Track 4 main at ${mainStartTime}`);
+      main4Source.onended = () => {
+        main4Source.disconnect();
+        const idx = this.currentSources.indexOf(main4Source);
+        if (idx > -1) this.currentSources.splice(idx, 1);
+      };
+      this.currentSources.push(main4Source);
+
+      // Only set up the switching interval for the current pair
+      if (isCurrentPair) {
+        // Calculate 4-bar (16 beat) duration for alternation
+        const fourBarDuration = this.calculate4BarDuration(pair.tempo);
+
+        // Reset hidden track state and set gains
+        this.currentHiddenTrack = 3;
+        this.updateHiddenTrackGains();
+
+        console.log(
+          `🔊 Track 3 gain: ${this.track3Gain!.gain.value}, Track 4 gain: ${this.track4Gain!.gain.value}`
+        );
+
+        // Clear any existing timeout and interval
+        if (this.hiddenTrackSwitchTimeout !== null) {
+          clearTimeout(this.hiddenTrackSwitchTimeout);
+          this.hiddenTrackSwitchTimeout = null;
+        }
+        if (this.hiddenTrackSwitchInterval !== null) {
+          clearInterval(this.hiddenTrackSwitchInterval);
+          this.hiddenTrackSwitchInterval = null;
+        }
+
+        // Calculate when to start switching (when main section begins)
+        const firstSwitchDelay = (mainStartTime - ctx.currentTime) * 1000;
+
+        // Set up switching to start when main section begins
+        // One track plays throughout intro, then switches at main start, then every 16 beats
+        this.hiddenTrackSwitchTimeout = window.setTimeout(() => {
+          if (!this.state.isPlaying) return;
+
+          // Switch to the other track when main starts
+          this.currentHiddenTrack = this.currentHiddenTrack === 3 ? 4 : 3;
+          this.updateHiddenTrackGains();
+          this.updateState({
+            activeHiddenTrack: this.mannieFreshMode ? this.currentHiddenTrack : null,
+          });
+          console.log(`🔄 Mannie Fresh: Main started, switched to track ${this.currentHiddenTrack}`);
+
+          // Set up interval to continue switching every 16 beats (4 bars)
+          this.hiddenTrackSwitchInterval = window.setInterval(() => {
+            // Only switch if MF mode is ON
+            if (!this.mannieFreshMode) {
+              return;
+            }
+
+            // Alternate between track 3 and 4
+            this.currentHiddenTrack = this.currentHiddenTrack === 3 ? 4 : 3;
+            this.updateHiddenTrackGains();
+
+            // Update state to show active track in UI
+            this.updateState({
+              activeHiddenTrack: this.mannieFreshMode ? this.currentHiddenTrack : null,
+            });
+
+            console.log(`🔄 Mannie Fresh: Switched to hidden track ${this.currentHiddenTrack}`);
+          }, fourBarDuration * 1000); // Switch every 16 beats (4 bars)
+        }, Math.max(0, firstSwitchDelay));
+      }
+
+    } catch (err) {
+      console.error('Error scheduling hidden tracks:', err);
+    }
   }
 
   private emit<K extends keyof PlayerEvents>(event: K, data: PlayerEvents[K]): void {
@@ -452,8 +824,27 @@ export class HamiltonianPlayer {
     const currentPair = this.createTrackPair(song1a, song1b, entry1.key, entry1.tempo);
     const nextPair = this.createTrackPair(song2a, song2b, entry2.key, entry2.tempo);
 
-    // Preload next pair for seamless transitions
-    await this.preloadNextPair(nextPair);
+    // Add hidden tracks to currentPair (first pair)
+    const currentRelatedKey3 = this.getMusicallyRelatedKey(entry1.key);
+    const currentRelatedKey4 = this.getMusicallyRelatedKey(entry1.key);
+    const currentSong3 = this.getNextSong(entry1.tempo, [song1a.artist, song1b.artist]);
+    const currentSong4 = this.getNextSong(entry1.tempo, [song1a.artist, song1b.artist, currentSong3.artist]);
+    currentPair.track3 = this.createTrack(currentSong3, currentRelatedKey3, entry1.tempo);
+    currentPair.track4 = this.createTrack(currentSong4, currentRelatedKey4, entry1.tempo);
+
+    // Add hidden tracks to nextPair
+    const relatedKey3 = this.getMusicallyRelatedKey(entry2.key);
+    const relatedKey4 = this.getMusicallyRelatedKey(entry2.key);
+    const song3 = this.getNextSong(entry2.tempo, [song2a.artist, song2b.artist]);
+    const song4 = this.getNextSong(entry2.tempo, [song2a.artist, song2b.artist, song3.artist]);
+    nextPair.track3 = this.createTrack(song3, relatedKey3, entry2.tempo);
+    nextPair.track4 = this.createTrack(song4, relatedKey4, entry2.tempo);
+
+    // Preload both current and next pair for seamless transitions
+    await Promise.all([
+      this.preloadNextPair(currentPair),
+      this.preloadNextPair(nextPair)
+    ]);
 
     this.updateState({
       isPlaying: true,
@@ -486,19 +877,25 @@ export class HamiltonianPlayer {
       this.playedSongIds.add(pair.track1.song.id);
       this.playedSongIds.add(pair.track2.song.id);
 
-      // Load audio for both tracks (should be instant if preloaded)
-      const [intro1Buffer, main1Buffer, intro2Buffer, main2Buffer] = await Promise.all([
+      // Load audio for ALL tracks (1, 2, 3, 4) before starting playback
+      // This ensures perfect alignment - all tracks start together
+      const [intro1Buffer, main1Buffer, intro2Buffer, main2Buffer, intro3Buffer, main3Buffer, intro4Buffer, main4Buffer] = await Promise.all([
         this.loadAudioBuffer(pair.track1.introUrl),
         this.loadAudioBuffer(pair.track1.mainUrl),
         this.loadAudioBuffer(pair.track2.introUrl),
         this.loadAudioBuffer(pair.track2.mainUrl),
+        this.loadAudioBuffer(pair.track3!.introUrl),
+        this.loadAudioBuffer(pair.track3!.mainUrl),
+        this.loadAudioBuffer(pair.track4!.introUrl),
+        this.loadAudioBuffer(pair.track4!.mainUrl),
       ]);
 
       // Calculate precise start time using Web Audio API
+      // Give more buffer time (0.1s) to ensure all tracks are ready
       if (startTime !== undefined) {
         this.pairStartTime = startTime;
       } else {
-        this.pairStartTime = ctx.currentTime + 0.05;
+        this.pairStartTime = ctx.currentTime + 0.1;
       }
 
       // Calculate all timing using IDEAL durations for perfect mathematical grid
@@ -553,6 +950,15 @@ export class HamiltonianPlayer {
         if (idx > -1) this.currentSources.splice(idx, 1);
       };
       this.currentSources.push(main2Source);
+
+      // Always schedule hidden tracks (they're silent unless MF mode is on)
+      // Pass pre-loaded buffers for perfect alignment
+      await this.scheduleHiddenTracks(pair, this.pairStartTime, mainStartTime, pairEndTime, true, {
+        intro3Buffer,
+        main3Buffer,
+        intro4Buffer,
+        main4Buffer
+      });
 
       this.emit('pairStart', pair);
       this.emit('introStart', pair);
@@ -676,6 +1082,9 @@ export class HamiltonianPlayer {
       };
       this.currentSources.push(main2Source);
 
+      // Always schedule hidden tracks (they're silent unless MF mode is on)
+      await this.scheduleHiddenTracksForScheduledPair(pairToSchedule, startTime, pairEndTime);
+
       // Track played songs
       this.playedSongIds.add(pairToSchedule.track1.song.id);
       this.playedSongIds.add(pairToSchedule.track2.song.id);
@@ -693,6 +1102,14 @@ export class HamiltonianPlayer {
       const song1 = this.getNextSong(nextEntry.tempo, avoidArtists);
       const song2 = this.getNextSong(nextEntry.tempo, [...avoidArtists, song1.artist]);
       const newNextPair = this.createTrackPair(song1, song2, nextEntry.key, nextEntry.tempo);
+
+      // Add hidden tracks to the new next pair
+      const relatedKey3 = this.getMusicallyRelatedKey(nextEntry.key);
+      const relatedKey4 = this.getMusicallyRelatedKey(nextEntry.key);
+      const song3 = this.getNextSong(nextEntry.tempo, [song1.artist, song2.artist]);
+      const song4 = this.getNextSong(nextEntry.tempo, [song1.artist, song2.artist, song3.artist]);
+      newNextPair.track3 = this.createTrack(song3, relatedKey3, nextEntry.tempo);
+      newNextPair.track4 = this.createTrack(song4, relatedKey4, nextEntry.tempo);
 
       // Update state.nextPair immediately (synchronously) so recursive scheduling works
       // The full UI update happens in setTimeout below

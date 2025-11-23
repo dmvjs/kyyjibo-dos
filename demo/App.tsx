@@ -1,9 +1,9 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { HamiltonianPlayer } from './player/HamiltonianPlayer';
-import type { PlayerState, TrackPair } from './player/HamiltonianPlayer';
-import { songs } from '../src/music/songdata';
-import type { Key, Tempo } from '../src/music/types';
-import { ALL_KEYS, ALL_TEMPOS } from '../src/music/types';
+import type { PlayerState } from './player/HamiltonianPlayer';
+import { songs } from '../src';
+import type { Key, Tempo } from '../src';
+import { ALL_TEMPOS } from '../src';
 
 const KEY_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
@@ -12,19 +12,19 @@ interface WakeLockSentinel {
   release(): Promise<void>;
 }
 
-function App() {
-  const [player] = useState(() => new HamiltonianPlayer(songs as any[]));
+function App(): React.ReactElement {
+  const [player] = useState(() => new HamiltonianPlayer([...songs]));
   const [playerState, setPlayerState] = useState<PlayerState>(player.getState());
   const [currentTrack, setCurrentTrack] = useState<'intro' | 'main'>('intro');
-  const [crossfader, setCrossfader] = useState(0.5); // 0 = all A, 0.5 = center, 1 = all B
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   // Wake Lock functionality
   useEffect(() => {
-    const requestWakeLock = async () => {
+    const requestWakeLock = async (): Promise<void> => {
       try {
         if ('wakeLock' in navigator) {
-          wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+          const nav = navigator as Navigator & { wakeLock: { request: (type: string) => Promise<WakeLockSentinel> } };
+          wakeLockRef.current = await nav.wakeLock.request('screen');
           console.log('Wake Lock active');
         }
       } catch (err) {
@@ -32,42 +32,47 @@ function App() {
       }
     };
 
-    const handleVisibilityChange = () => {
+    const handleVisibilityChange = (): void => {
       if (document.visibilityState === 'visible') {
         void requestWakeLock();
+      } else {
+        // Pause playback when page becomes hidden (phone locks, tab switched, etc.)
+        if (playerState.isPlaying) {
+          void player.pause();
+        }
       }
     };
 
     void requestWakeLock();
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    return () => {
+    return (): void => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (wakeLockRef.current) {
         void wakeLockRef.current.release();
       }
     };
-  }, []);
+  }, [player, playerState.isPlaying]);
 
   useEffect(() => {
     // Subscribe to player events
-    const unsubscribeState = player.on('stateChange', (state) => {
+    const unsubscribeState = player.on('stateChange', (state): void => {
       setPlayerState(state);
     });
 
-    const unsubscribeIntro = player.on('introStart', () => {
+    const unsubscribeIntro = player.on('introStart', (): void => {
       setCurrentTrack('intro');
     });
 
-    const unsubscribeMain = player.on('mainStart', () => {
+    const unsubscribeMain = player.on('mainStart', (): void => {
       setCurrentTrack('main');
     });
 
-    const unsubscribeError = player.on('error', (error) => {
+    const unsubscribeError = player.on('error', (error): void => {
       console.error('Player error:', error);
     });
 
-    return () => {
+    return (): void => {
       unsubscribeState();
       unsubscribeIntro();
       unsubscribeMain();
@@ -75,80 +80,40 @@ function App() {
     };
   }, [player]);
 
-  const handlePlay = () => {
+  const handlePlay = (): void => {
     void player.play();
   };
 
-  const handlePause = () => {
+  const handlePause = (): void => {
     void player.pause();
   };
 
-  const handleStop = () => {
+  const handleStop = (): void => {
     player.stop();
   };
 
-  const handleSkipForward = () => {
-    void player.skipForward();
-  };
-
-  const handleSkipBack = () => {
-    void player.skipBack();
-  };
-
-  const handleKeyChange = (key: Key) => {
+  const handleKeyChange = (key: Key): void => {
     player.setKey(key);
   };
 
-  const handleTempoChange = (tempo: Tempo) => {
+  const handleTempoChange = (tempo: Tempo): void => {
     player.setTempo(tempo);
   };
 
-  const handleCrossfaderChange = (value: number) => {
-    setCrossfader(value);
-    player.setCrossfader(value);
+  const handleMannieFreshToggle = (): void => {
+    player.toggleMannieFreshMode();
   };
 
   return (
     <div className="app">
       {/* Playback Controls - Top */}
       <div className="controls">
-        <button
-          className="ctrl-btn"
-          onClick={handleSkipBack}
-          disabled={!playerState.canSkipBack || !playerState.isPlaying}
-        >
-          ⏮
-        </button>
         {!playerState.isPlaying ? (
           <button className="ctrl-btn play" onClick={handlePlay}>▶</button>
         ) : (
           <button className="ctrl-btn" onClick={handlePause}>⏸</button>
         )}
         <button className="ctrl-btn" onClick={handleStop}>⏹</button>
-        <button
-          className="ctrl-btn"
-          onClick={handleSkipForward}
-          disabled={!playerState.canSkipForward || !playerState.isPlaying}
-        >
-          ⏭
-        </button>
-      </div>
-
-      {/* Crossfader - Full Width */}
-      <div className="crossfader-container">
-        <div className="crossfader-label">A</div>
-        <div className="crossfader-track">
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={crossfader}
-            onChange={(e) => handleCrossfaderChange(parseFloat(e.target.value))}
-            className="crossfader-slider"
-          />
-        </div>
-        <div className="crossfader-label">B</div>
       </div>
 
       {/* Status Bar */}
@@ -187,6 +152,18 @@ function App() {
               {tempo}
             </button>
           ))}
+          {/* Mannie Fresh Mode Toggle */}
+          <div className="mf-toggle-container" style={{ marginLeft: 'auto', paddingLeft: '32px' }}>
+            <span className="mf-label">MF</span>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={playerState.mannieFreshMode}
+                onChange={handleMannieFreshToggle}
+              />
+              <span className="slider"></span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -194,20 +171,38 @@ function App() {
       {playerState.currentPair && (
         <div className="track-section">
           <div className="section-label">NOW PLAYING</div>
-          <div className="track-row">
+          <div className="track-row compact">
             <div className="track-num">1</div>
-            <div className="track-info">
-              <div className="track-title">{playerState.currentPair.track1.song.title}</div>
-              <div className="track-artist">{playerState.currentPair.track1.song.artist}</div>
+            <div className="track-info-compact">
+              {playerState.currentPair.track1.song.artist} - {playerState.currentPair.track1.song.title}
             </div>
+            <div className="track-key">{KEY_NAMES[playerState.currentPair.track1.song.key - 1]}</div>
           </div>
-          <div className="track-row">
+          <div className="track-row compact">
             <div className="track-num">2</div>
-            <div className="track-info">
-              <div className="track-title">{playerState.currentPair.track2.song.title}</div>
-              <div className="track-artist">{playerState.currentPair.track2.song.artist}</div>
+            <div className="track-info-compact">
+              {playerState.currentPair.track2.song.artist} - {playerState.currentPair.track2.song.title}
             </div>
+            <div className="track-key">{KEY_NAMES[playerState.currentPair.track2.song.key - 1]}</div>
           </div>
+          {playerState.currentPair.track3 && (
+            <div className={`track-row compact ${!playerState.mannieFreshMode || (playerState.mannieFreshMode && playerState.activeHiddenTrack !== 3) ? 'inactive-mf' : ''}`}>
+              <div className="track-num">3</div>
+              <div className="track-info-compact">
+                {playerState.currentPair.track3.song.artist} - {playerState.currentPair.track3.song.title}
+              </div>
+              <div className="track-key">{KEY_NAMES[playerState.currentPair.track3.song.key - 1]}</div>
+            </div>
+          )}
+          {playerState.currentPair.track4 && (
+            <div className={`track-row compact ${!playerState.mannieFreshMode || (playerState.mannieFreshMode && playerState.activeHiddenTrack !== 4) ? 'inactive-mf' : ''}`}>
+              <div className="track-num">4</div>
+              <div className="track-info-compact">
+                {playerState.currentPair.track4.song.artist} - {playerState.currentPair.track4.song.title}
+              </div>
+              <div className="track-key">{KEY_NAMES[playerState.currentPair.track4.song.key - 1]}</div>
+            </div>
+          )}
         </div>
       )}
 
@@ -215,20 +210,34 @@ function App() {
       {playerState.nextPair && (
         <div className="track-section">
           <div className="section-label">UP NEXT</div>
-          <div className="track-row">
+          <div className="track-row compact">
             <div className="track-num">1</div>
-            <div className="track-info">
-              <div className="track-title">{playerState.nextPair.track1.song.title}</div>
-              <div className="track-artist">{playerState.nextPair.track1.song.artist}</div>
+            <div className="track-info-compact">
+              {playerState.nextPair.track1.song.artist} - {playerState.nextPair.track1.song.title}
             </div>
           </div>
-          <div className="track-row">
+          <div className="track-row compact">
             <div className="track-num">2</div>
-            <div className="track-info">
-              <div className="track-title">{playerState.nextPair.track2.song.title}</div>
-              <div className="track-artist">{playerState.nextPair.track2.song.artist}</div>
+            <div className="track-info-compact">
+              {playerState.nextPair.track2.song.artist} - {playerState.nextPair.track2.song.title}
             </div>
           </div>
+          {playerState.nextPair.track3 && (
+            <div className="track-row compact">
+              <div className="track-num">3</div>
+              <div className="track-info-compact">
+                {playerState.nextPair.track3.song.artist} - {playerState.nextPair.track3.song.title}
+              </div>
+            </div>
+          )}
+          {playerState.nextPair.track4 && (
+            <div className="track-row compact">
+              <div className="track-num">4</div>
+              <div className="track-info-compact">
+                {playerState.nextPair.track4.song.artist} - {playerState.nextPair.track4.song.title}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
