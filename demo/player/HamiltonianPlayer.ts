@@ -16,6 +16,7 @@ import type { Song, Key, Tempo, TrackType } from '@/music/types';
 import { BEAT_COUNTS, ALL_TEMPOS } from '@/music/types';
 import { MUSIC_BASE_URL } from '../config';
 import { EnhancedRandom } from '@/random/EnhancedRandom';
+import { encodeWAV } from '@/utils/wavEncoder';
 
 /**
  * Calculate the duration in seconds for a track at a given tempo.
@@ -67,6 +68,9 @@ export interface PlayerState {
   mannieFreshMode: boolean;
   activeHiddenTrack: 3 | 4 | null; // Which MF track is currently playing
   eightZeroEightMode: boolean; // 808 Mode - frequency split & rhythmic recombination
+  isRecordingArmed: boolean; // Recording armed (waiting for playback to start)
+  isRecordingActive: boolean; // Recording actively capturing audio
+  recordingDuration: number; // Recording duration in seconds
 }
 
 /**
@@ -137,6 +141,18 @@ export class HamiltonianPlayer {
   private eightZeroEightCompressor: DynamicsCompressorNode | null = null; // Dedicated compressor for 808 mode
   private eightZeroEightMakeupGain: GainNode | null = null; // Makeup gain to compensate for frequency splitting
 
+  // Recording (lossless WAV)
+  private mediaStreamDestination: MediaStreamAudioDestinationNode | null = null;
+  private scriptProcessor: ScriptProcessorNode | null = null;
+  private recordedBuffers: Float32Array[] = [];
+  private recordingStartTime: number = 0;
+  private recordingTimer: number | null = null;
+  private isRecordingPaused: boolean = false;
+
+  // Pre-computed playlist for URL-based sharing
+  private precomputedPlaylist: TrackPair[] | null = null;
+  private precomputedIndex: number = 0;
+
   constructor(songs: Song[], initialKey?: Key, initialTempo?: Tempo) {
     this.songs = songs;
     this.qrng = new EnhancedRandom();
@@ -192,6 +208,9 @@ export class HamiltonianPlayer {
       mannieFreshMode: true,
       activeHiddenTrack: 3,
       eightZeroEightMode: false,
+      isRecordingArmed: false,
+      isRecordingActive: false,
+      recordingDuration: 0,
     };
   }
 
@@ -314,19 +333,54 @@ export class HamiltonianPlayer {
       }
     }
 
-    // Key compatibility (harmonic scoring - perfect match gets bonus)
-    if (song.key === key) {
-      score += 50; // Perfect key match
-    } else {
-      // Compatible keys (circle of fifths, relative minor/major, etc.)
-      const keyDiff = Math.abs(song.key - key);
-      const circularDiff = Math.min(keyDiff, 12 - keyDiff);
+    // Key compatibility with multiple "chord hitting" approaches for maximum diversity
+    // Like Chordant: randomly use different harmonic relationships
+    const harmonicApproach = Math.floor(Math.random() * 6); // 6 different approaches
+    const keyDiff = Math.abs(song.key - key);
+    const circularDiff = Math.min(keyDiff, 12 - keyDiff);
 
-      if (circularDiff === 0) score += 50; // Perfect
-      else if (circularDiff === 5 || circularDiff === 7) score += 30; // Perfect fifth/fourth
-      else if (circularDiff === 3 || circularDiff === 4) score += 20; // Relative minor/major
-      else if (circularDiff === 2) score += 10; // Whole step
-      else score -= circularDiff * 5; // Penalize distant keys
+    if (song.key === key) {
+      score += 50; // Perfect key match (always valid)
+    } else {
+      switch (harmonicApproach) {
+        case 0: // Traditional: circle of fifths
+          if (circularDiff === 5 || circularDiff === 7) score += 30; // Perfect fifth/fourth
+          else if (circularDiff === 3 || circularDiff === 4) score += 20; // Relative minor/major
+          else if (circularDiff === 2) score += 10; // Whole step
+          else score -= circularDiff * 3;
+          break;
+
+        case 1: // Pentatonic: focus on 2nd, 5th, 9th (whole tone relationships)
+          if (circularDiff === 2 || circularDiff === 5 || circularDiff === 9) score += 35; // Pentatonic intervals
+          else if (circularDiff === 7) score += 25; // Fifth
+          else score -= circularDiff * 4;
+          break;
+
+        case 2: // Modal: emphasize 2nd, 4th, 6th (modal interchange)
+          if (circularDiff === 2 || circularDiff === 4 || circularDiff === 6) score += 30; // Modal shifts
+          else if (circularDiff === 3 || circularDiff === 5) score += 20;
+          else score -= circularDiff * 3;
+          break;
+
+        case 3: // Parallel/Modal: same root different mode (tritone)
+          if (circularDiff === 6) score += 35; // Tritone substitution (jazz harmony)
+          else if (circularDiff === 3 || circularDiff === 9) score += 25; // Minor third / major sixth
+          else score -= circularDiff * 4;
+          break;
+
+        case 4: // Extended harmony: 6ths, 9ths, 11ths
+          if (circularDiff === 8 || circularDiff === 9) score += 30; // Major 6th / Major 9th
+          else if (circularDiff === 2 || circularDiff === 11) score += 25; // 2nd / 11th
+          else score -= circularDiff * 3;
+          break;
+
+        case 5: // Chromatic/Adjacent: stepwise motion
+          if (circularDiff === 1) score += 35; // Semitone (chromatic approach)
+          else if (circularDiff === 2) score += 30; // Whole tone
+          else if (circularDiff === 5 || circularDiff === 7) score += 20; // Falls back to fifths
+          else score -= circularDiff * 3;
+          break;
+      }
     }
 
     // Artist diversity - penalize if artist matches any in avoid list
@@ -608,6 +662,10 @@ export class HamiltonianPlayer {
       this.masterCompressor.attack.setValueAtTime(0.003, this.audioContext.currentTime);
       this.masterCompressor.release.setValueAtTime(0.25, this.audioContext.currentTime);
       this.masterCompressor.connect(this.audioContext.destination);
+
+      // Create MediaStreamDestination for recording
+      this.mediaStreamDestination = this.audioContext.createMediaStreamDestination();
+      this.masterCompressor.connect(this.mediaStreamDestination);
 
       // Create gain nodes for crossfading
       this.track1Gain = this.audioContext.createGain();
@@ -1376,7 +1434,48 @@ export class HamiltonianPlayer {
     if (this.state.isPaused) {
       // Resume from pause
       await ctx.resume();
-      this.updateState({ isPlaying: true, isPaused: false });
+
+      // Resume recording if it was active
+      if (this.isRecordingPaused && this.scriptProcessor && this.state.isRecordingArmed) {
+        this.isRecordingPaused = false;
+        this.updateState({ isPlaying: true, isPaused: false, isRecordingActive: true });
+      } else {
+        this.updateState({ isPlaying: true, isPaused: false });
+      }
+      return;
+    }
+
+    // Use pre-computed playlist if available
+    if (this.precomputedPlaylist && this.precomputedPlaylist.length > 0) {
+      const currentPair = this.precomputedPlaylist[this.precomputedIndex];
+      const nextPair = this.precomputedPlaylist[this.precomputedIndex + 1];
+
+      if (!currentPair) {
+        throw new Error('Failed to get current pair from precomputed playlist');
+      }
+
+      // Preload both current and next pair
+      await this.preloadNextPair(currentPair);
+      if (nextPair) {
+        await this.preloadNextPair(nextPair);
+      }
+
+      this.updateState({
+        isPlaying: true,
+        isPaused: false,
+        currentPair,
+        nextPair: nextPair || null,
+        key: currentPair.key,
+        tempo: currentPair.tempo,
+        progressIndex: this.precomputedIndex,
+      });
+
+      // Start recording if armed (right before audio plays)
+      if (this.state.isRecordingArmed && !this.state.isRecordingActive) {
+        this.startRecordingNow();
+      }
+
+      await this.playPair(currentPair);
       return;
     }
 
@@ -1462,6 +1561,11 @@ export class HamiltonianPlayer {
       tempo: entry1.tempo,
       progressIndex: this.progressIndex,
     });
+
+    // Start recording if armed (right before audio plays)
+    if (this.state.isRecordingArmed && !this.state.isRecordingActive) {
+      this.startRecordingNow();
+    }
 
     await this.playPair(currentPair);
   }
@@ -1709,48 +1813,83 @@ export class HamiltonianPlayer {
       this.playedSongIds.add(pairToSchedule.track2.song.id);
       this.playHistory.push(pairToSchedule);
 
-      // Update progression index (move to the pair we just scheduled)
-      this.progressIndex = (this.progressIndex + 1) % this.progression.length;
+      // Use pre-computed playlist if available
+      let newNextPair: TrackPair;
+      if (this.precomputedPlaylist && this.precomputedPlaylist.length > 0) {
+        // Check if we've reached the end of the playlist
+        const isLastPair = this.precomputedIndex >= this.precomputedPlaylist.length - 2;
 
-      // Prepare the NEW next pair using smart selection
-      const nextEntry = this.progression[(this.progressIndex + 1) % this.progression.length];
-      if (!nextEntry) {
-        throw new Error('Failed to get next progression entry');
+        if (isLastPair) {
+          // Generate new playlist and emit event for URL update
+          const newMix = await this.generateCompleteMix();
+          this.precomputedPlaylist = newMix;
+          this.precomputedIndex = 0;
+
+          // Emit custom event for playlist regeneration (App.tsx will handle URL update)
+          if (typeof window !== 'undefined') {
+            const event = new CustomEvent('playlist-regenerated', {
+              detail: {
+                playlist: newMix,
+                encodedPlaylist: this.encodePlaylistToURL(newMix)
+              }
+            });
+            window.dispatchEvent(event);
+          }
+        } else {
+          // Advance to next pair in precomputed playlist
+          this.precomputedIndex = this.precomputedIndex + 1;
+        }
+
+        const nextPrecomputedPair = this.precomputedPlaylist[(this.precomputedIndex + 1) % this.precomputedPlaylist.length];
+        if (!nextPrecomputedPair) {
+          throw new Error('Failed to get next pair from precomputed playlist');
+        }
+        newNextPair = nextPrecomputedPair;
+        this.progressIndex = this.precomputedIndex;
+      } else {
+        // Update progression index (move to the pair we just scheduled)
+        this.progressIndex = (this.progressIndex + 1) % this.progression.length;
+
+        // Prepare the NEW next pair using smart selection
+        const nextEntry = this.progression[(this.progressIndex + 1) % this.progression.length];
+        if (!nextEntry) {
+          throw new Error('Failed to get next progression entry');
+        }
+
+        const avoidArtists = [
+          ...this.recentArtists.slice(0, 10),
+          pairToSchedule.track1.song.artist,
+          pairToSchedule.track2.song.artist
+        ];
+        const song1 = await this.getNextSongSmart(nextEntry.tempo, nextEntry.key, null, avoidArtists);
+        const song2 = await this.getNextSongSmart(nextEntry.tempo, nextEntry.key, song1, [...avoidArtists, song1.artist]);
+
+        // Mark pair as played and track songs
+        this.markPairPlayed(song1, song2);
+        this.playedSongIds.add(song1.id);
+        this.playedSongIds.add(song2.id);
+        this.recentSongs.unshift(song1, song2);
+        if (this.recentSongs.length > 50) this.recentSongs = this.recentSongs.slice(0, 50);
+        this.recentArtists.unshift(song1.artist, song2.artist);
+        if (this.recentArtists.length > 30) this.recentArtists = this.recentArtists.slice(0, 30);
+
+        newNextPair = this.createTrackPair(song1, song2, nextEntry.key, nextEntry.tempo);
+
+        // Add hidden tracks to the new next pair
+        const relatedKey3 = await this.getMusicallyRelatedKey(nextEntry.key);
+        const relatedKey4 = await this.getMusicallyRelatedKey(nextEntry.key);
+        const song3 = await this.getNextSongSmart(nextEntry.tempo, relatedKey3, null, [song1.artist, song2.artist], [song1.id, song2.id]);
+        const song4 = await this.getNextSongSmart(nextEntry.tempo, relatedKey4, null, [song1.artist, song2.artist, song3.artist], [song1.id, song2.id, song3.id]);
+        this.playedSongIds.add(song3.id);
+        this.playedSongIds.add(song4.id);
+        // Track MF tracks for recency
+        this.recentSongs.unshift(song3, song4);
+        if (this.recentSongs.length > 50) this.recentSongs = this.recentSongs.slice(0, 50);
+        this.recentArtists.unshift(song3.artist, song4.artist);
+        if (this.recentArtists.length > 30) this.recentArtists = this.recentArtists.slice(0, 30);
+        newNextPair.track3 = this.createTrack(song3, relatedKey3, nextEntry.tempo);
+        newNextPair.track4 = this.createTrack(song4, relatedKey4, nextEntry.tempo);
       }
-
-      const avoidArtists = [
-        ...this.recentArtists.slice(0, 10),
-        pairToSchedule.track1.song.artist,
-        pairToSchedule.track2.song.artist
-      ];
-      const song1 = await this.getNextSongSmart(nextEntry.tempo, nextEntry.key, null, avoidArtists);
-      const song2 = await this.getNextSongSmart(nextEntry.tempo, nextEntry.key, song1, [...avoidArtists, song1.artist]);
-
-      // Mark pair as played and track songs
-      this.markPairPlayed(song1, song2);
-      this.playedSongIds.add(song1.id);
-      this.playedSongIds.add(song2.id);
-      this.recentSongs.unshift(song1, song2);
-      if (this.recentSongs.length > 50) this.recentSongs = this.recentSongs.slice(0, 50);
-      this.recentArtists.unshift(song1.artist, song2.artist);
-      if (this.recentArtists.length > 30) this.recentArtists = this.recentArtists.slice(0, 30);
-
-      const newNextPair = this.createTrackPair(song1, song2, nextEntry.key, nextEntry.tempo);
-
-      // Add hidden tracks to the new next pair
-      const relatedKey3 = await this.getMusicallyRelatedKey(nextEntry.key);
-      const relatedKey4 = await this.getMusicallyRelatedKey(nextEntry.key);
-      const song3 = await this.getNextSongSmart(nextEntry.tempo, relatedKey3, null, [song1.artist, song2.artist], [song1.id, song2.id]);
-      const song4 = await this.getNextSongSmart(nextEntry.tempo, relatedKey4, null, [song1.artist, song2.artist, song3.artist], [song1.id, song2.id, song3.id]);
-      this.playedSongIds.add(song3.id);
-      this.playedSongIds.add(song4.id);
-      // Track MF tracks for recency
-      this.recentSongs.unshift(song3, song4);
-      if (this.recentSongs.length > 50) this.recentSongs = this.recentSongs.slice(0, 50);
-      this.recentArtists.unshift(song3.artist, song4.artist);
-      if (this.recentArtists.length > 30) this.recentArtists = this.recentArtists.slice(0, 30);
-      newNextPair.track3 = this.createTrack(song3, relatedKey3, nextEntry.tempo);
-      newNextPair.track4 = this.createTrack(song4, relatedKey4, nextEntry.tempo);
 
       // Update state.nextPair immediately (synchronously) so recursive scheduling works
       // The full UI update happens in setTimeout below
@@ -1991,8 +2130,13 @@ export class HamiltonianPlayer {
     const ctx = this.ensureAudioContext();
     await ctx.suspend();
 
+    // Pause recording if active (just set flag, ScriptProcessor keeps running)
+    if (this.state.isRecordingActive) {
+      this.isRecordingPaused = true;
+    }
+
     this.clearScheduled();
-    this.updateState({ isPaused: true, isPlaying: false });
+    this.updateState({ isPaused: true, isPlaying: false, isRecordingActive: false });
   }
 
   /**
@@ -2014,6 +2158,9 @@ export class HamiltonianPlayer {
     // Clear preloaded buffers to free memory
     this.preloadedBuffers.clear();
     this.scheduledPairsCount = 0;
+
+    // Always stop and save recording
+    this.stopRecording();
 
     this.updateState({
       isPlaying: false,
@@ -2148,6 +2295,9 @@ export class HamiltonianPlayer {
    */
   setKey(key: Key): void {
     if (!this.state.isPlaying) {
+      // Regenerate progression from this key
+      this.progression = this.generateProgressionFromPoint(key, this.state.tempo);
+      this.progressIndex = 0;
       this.updateState({ key });
       return;
     }
@@ -2183,6 +2333,9 @@ export class HamiltonianPlayer {
    */
   setTempo(tempo: Tempo): void {
     if (!this.state.isPlaying) {
+      // Regenerate progression from this tempo
+      this.progression = this.generateProgressionFromPoint(this.state.key, tempo);
+      this.progressIndex = 0;
       this.updateState({ tempo });
       return;
     }
@@ -2277,6 +2430,449 @@ export class HamiltonianPlayer {
         // Can't generate more pairs without reshuffle
         break;
       }
+    }
+
+    return playlist;
+  }
+
+  /**
+   * Arm recording (ready to record, but wait for playback to start).
+   */
+  armRecording(): void {
+    // Ensure audio context exists (creates it if needed)
+    this.ensureAudioContext();
+
+    if (!this.mediaStreamDestination) {
+      return;
+    }
+
+    this.updateState({
+      isRecordingArmed: true,
+    });
+  }
+
+  /**
+   * Disarm recording without starting it.
+   */
+  disarmRecording(): void {
+    this.updateState({
+      isRecordingArmed: false,
+    });
+  }
+
+  /**
+   * Actually start the recording (called internally when playback starts).
+   * Uses ScriptProcessorNode to capture raw PCM audio for lossless WAV export.
+   */
+  private startRecordingNow(): void {
+    if (!this.audioContext || this.scriptProcessor) {
+      return;
+    }
+
+    try {
+      const ctx = this.audioContext;
+      const bufferSize = 4096;
+      const numChannels = 2;
+
+      // Create ScriptProcessorNode to capture raw audio
+      this.scriptProcessor = ctx.createScriptProcessor(bufferSize, numChannels, numChannels);
+
+      this.recordedBuffers = [];
+      this.isRecordingPaused = false;
+      this.recordingStartTime = Date.now();
+
+      // Capture audio buffers
+      this.scriptProcessor.onaudioprocess = (event: AudioProcessingEvent): void => {
+        if (this.isRecordingPaused) return;
+
+        // Copy left and right channels
+        const leftChannel = new Float32Array(event.inputBuffer.getChannelData(0));
+        const rightChannel = new Float32Array(event.inputBuffer.getChannelData(1));
+
+        this.recordedBuffers.push(leftChannel, rightChannel);
+      };
+
+      // Connect to master compressor to capture final output
+      if (this.masterCompressor) {
+        this.masterCompressor.connect(this.scriptProcessor);
+        this.scriptProcessor.connect(ctx.destination);
+      }
+
+      // Update duration every second
+      this.recordingTimer = window.setInterval(() => {
+        const duration = Math.floor((Date.now() - this.recordingStartTime) / 1000);
+        this.updateState({
+          recordingDuration: duration,
+        });
+      }, 1000);
+
+      this.updateState({
+        isRecordingActive: true,
+        recordingDuration: 0,
+      });
+    } catch (err) {
+      // Recording failed
+      this.updateState({
+        isRecordingArmed: false,
+        isRecordingActive: false,
+      });
+    }
+  }
+
+  /**
+   * Stop recording and download the file.
+   */
+  stopRecording(): void {
+    if (this.scriptProcessor && this.state.isRecordingActive) {
+      // Stop capturing audio
+      this.scriptProcessor.disconnect();
+      this.scriptProcessor = null;
+
+      if (this.recordingTimer) {
+        clearInterval(this.recordingTimer);
+        this.recordingTimer = null;
+      }
+
+      // Encode to WAV and download
+      if (this.recordedBuffers.length > 0 && this.audioContext) {
+        const sampleRate = this.audioContext.sampleRate;
+        const numChannels = 2;
+
+        // Separate left and right channels
+        const leftBuffers: Float32Array[] = [];
+        const rightBuffers: Float32Array[] = [];
+        for (let i = 0; i < this.recordedBuffers.length; i += 2) {
+          leftBuffers.push(this.recordedBuffers[i]);
+          rightBuffers.push(this.recordedBuffers[i + 1]);
+        }
+
+        // Encode to WAV
+        const wavBlob = encodeWAV([
+          this.concatenateBuffers(leftBuffers),
+          this.concatenateBuffers(rightBuffers)
+        ], sampleRate, numChannels);
+
+        // Create filename with date and time
+        const date = new Date();
+        const dateTimeStr = date.toISOString().replace(/:/g, '-').replace(/\..+/, '').replace('T', '_') || 'recording';
+        const baseFilename = `${dateTimeStr}`;
+
+        // Auto-download the recording
+        const url = URL.createObjectURL(wavBlob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = `${baseFilename}.wav`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        // Download playlist file
+        this.downloadPlaylist(baseFilename);
+      }
+
+      // Clear recording state
+      this.recordedBuffers = [];
+      this.recordingStartTime = 0;
+      this.updateState({
+        isRecordingArmed: false,
+        isRecordingActive: false,
+        recordingDuration: 0,
+      });
+    } else if (this.state.isRecordingArmed) {
+      // Not actively recording, just disarm
+      this.disarmRecording();
+    }
+  }
+
+  /**
+   * Helper to concatenate audio buffers.
+   */
+  private concatenateBuffers(buffers: Float32Array[]): Float32Array {
+    const totalLength = buffers.reduce((sum, buffer) => sum + buffer.length, 0);
+    const result = new Float32Array(totalLength);
+    let offset = 0;
+    for (const buffer of buffers) {
+      result.set(buffer, offset);
+      offset += buffer.length;
+    }
+    return result;
+  }
+
+  /**
+   * Generate the complete planned mix (all pairs with all 4 tracks).
+   */
+  async generateCompleteMix(): Promise<TrackPair[]> {
+    const completeMix: TrackPair[] = [];
+    const tempPlayedSongIds = new Set<number>();
+    const tempRecentArtists: string[] = [];
+    const tempRecentSongs: Song[] = [];
+
+    // Continue generating pairs until we've used all (or most) songs
+    // Each pair uses 4 songs, so we need roughly songs.length / 4 pairs
+    const targetPairs = Math.ceil(this.songs.length / 4);
+    let progressionIndex = 0;
+
+    for (let i = 0; i < targetPairs; i++) {
+      // Cycle through progression for key/tempo guidance
+      const entry = this.progression[progressionIndex % this.progression.length];
+      if (!entry) continue;
+      progressionIndex++;
+
+      try {
+        // Generate pair with same logic as real playback
+        const song1 = await this.getNextSongSmart(entry.tempo, entry.key, null, tempRecentArtists.slice(0, 10), Array.from(tempPlayedSongIds));
+        const song2 = await this.getNextSongSmart(entry.tempo, entry.key, song1, [...tempRecentArtists.slice(0, 10), song1.artist], Array.from(tempPlayedSongIds));
+
+        // Track songs
+        tempPlayedSongIds.add(song1.id);
+        tempPlayedSongIds.add(song2.id);
+        tempRecentSongs.unshift(song1, song2);
+        if (tempRecentSongs.length > 50) tempRecentSongs.splice(50);
+        tempRecentArtists.unshift(song1.artist, song2.artist);
+        if (tempRecentArtists.length > 30) tempRecentArtists.splice(30);
+
+        // Generate hidden tracks (tracks 3 and 4)
+        const relatedKey3 = ((entry.key + 4) % 10) + 1 as Key;
+        const relatedKey4 = ((entry.key + 7) % 10) + 1 as Key;
+
+        const song3 = await this.getNextSongSmart(entry.tempo, relatedKey3, null, [...tempRecentArtists.slice(0, 10), song1.artist, song2.artist], Array.from(tempPlayedSongIds));
+        const song4 = await this.getNextSongSmart(entry.tempo, relatedKey4, song3, [...tempRecentArtists.slice(0, 10), song3.artist, song1.artist, song2.artist], Array.from(tempPlayedSongIds));
+
+        tempPlayedSongIds.add(song3.id);
+        tempPlayedSongIds.add(song4.id);
+        tempRecentSongs.unshift(song3, song4);
+        if (tempRecentSongs.length > 50) tempRecentSongs.splice(50);
+        tempRecentArtists.unshift(song3.artist, song4.artist);
+        if (tempRecentArtists.length > 30) tempRecentArtists.splice(30);
+
+        // Create the complete pair
+        const pair: TrackPair = {
+          track1: this.createTrack(song1, entry.key, entry.tempo),
+          track2: this.createTrack(song2, entry.key, entry.tempo),
+          track3: this.createTrack(song3, relatedKey3, entry.tempo),
+          track4: this.createTrack(song4, relatedKey4, entry.tempo),
+          key: entry.key,
+          tempo: entry.tempo,
+        };
+
+        completeMix.push(pair);
+      } catch (err) {
+        // Skip this pair if generation fails
+      }
+    }
+
+    return completeMix;
+  }
+
+  /**
+   * Export the complete planned mix as a text file.
+   */
+  async exportCompleteMix(): Promise<void> {
+    const completeMix = await this.generateCompleteMix();
+    const KEY_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+    let playlistText = `KWYJIBO COMPLETE MIX - ${new Date().toLocaleString()}\n`;
+    playlistText += `${'='.repeat(60)}\n\n`;
+    playlistText += `Total Sets: ${completeMix.length}\n`;
+
+    // Calculate statistics
+    const allSongIds = new Set<number>();
+    completeMix.forEach(pair => {
+      allSongIds.add(pair.track1.song.id);
+      allSongIds.add(pair.track2.song.id);
+      if (pair.track3) allSongIds.add(pair.track3.song.id);
+      if (pair.track4) allSongIds.add(pair.track4.song.id);
+    });
+
+    const totalDurationSeconds = completeMix.reduce((sum, pair) => {
+      return sum + pair.track1.introDuration + pair.track1.mainDuration;
+    }, 0);
+    const durationMinutes = Math.floor(totalDurationSeconds / 60);
+
+    playlistText += `Unique Songs: ${allSongIds.size} / ${this.songs.length}\n`;
+    playlistText += `Total Duration: ~${durationMinutes} minutes\n\n`;
+
+    completeMix.forEach((pair, idx) => {
+      playlistText += `SET ${idx + 1}\n`;
+      playlistText += `${'-'.repeat(40)}\n`;
+      playlistText += `Key: ${KEY_NAMES[pair.key - 1]}  |  Tempo: ${pair.tempo} BPM\n\n`;
+
+      playlistText += `  1. ${pair.track1.song.artist} - ${pair.track1.song.title}\n`;
+      playlistText += `     Key: ${KEY_NAMES[pair.track1.song.key - 1]}\n\n`;
+
+      playlistText += `  2. ${pair.track2.song.artist} - ${pair.track2.song.title}\n`;
+      playlistText += `     Key: ${KEY_NAMES[pair.track2.song.key - 1]}\n\n`;
+
+      if (pair.track3) {
+        playlistText += `  3. ${pair.track3.song.artist} - ${pair.track3.song.title}\n`;
+        playlistText += `     Key: ${KEY_NAMES[pair.track3.song.key - 1]}\n\n`;
+      }
+
+      if (pair.track4) {
+        playlistText += `  4. ${pair.track4.song.artist} - ${pair.track4.song.title}\n`;
+        playlistText += `     Key: ${KEY_NAMES[pair.track4.song.key - 1]}\n\n`;
+      }
+
+      playlistText += '\n';
+    });
+
+    playlistText += `\n${'='.repeat(60)}\n`;
+    playlistText += `Mixed with KWYJIBO\n`;
+    playlistText += `Quantum-powered Hamiltonian DJ technology\n`;
+
+    // Download the file
+    const blob = new Blob([playlistText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    const dateStr = new Date().toISOString().split('T')[0];
+    a.download = `${dateStr}-complete-mix.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  /**
+   * Download playlist as a text file.
+   */
+  private downloadPlaylist(baseFilename: string): void {
+    const KEY_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+    let playlistText = `KWYJIBO DJ SET - ${new Date().toLocaleString()}\n`;
+    playlistText += `${'='.repeat(60)}\n\n`;
+
+    if (this.playHistory.length === 0) {
+      playlistText += 'No tracks played during this recording.\n';
+    } else {
+      playlistText += `Total Sets: ${this.playHistory.length}\n\n`;
+
+      this.playHistory.forEach((pair, idx) => {
+        playlistText += `SET ${idx + 1}\n`;
+        playlistText += `${'-'.repeat(40)}\n`;
+        playlistText += `Key: ${KEY_NAMES[pair.key - 1]}  |  Tempo: ${pair.tempo} BPM\n\n`;
+
+        playlistText += `  1. ${pair.track1.song.artist} - ${pair.track1.song.title}\n`;
+        playlistText += `     Key: ${KEY_NAMES[pair.track1.song.key - 1]}\n\n`;
+
+        playlistText += `  2. ${pair.track2.song.artist} - ${pair.track2.song.title}\n`;
+        playlistText += `     Key: ${KEY_NAMES[pair.track2.song.key - 1]}\n\n`;
+
+        if (pair.track3) {
+          playlistText += `  3. ${pair.track3.song.artist} - ${pair.track3.song.title}\n`;
+          playlistText += `     Key: ${KEY_NAMES[pair.track3.song.key - 1]}\n\n`;
+        }
+
+        if (pair.track4) {
+          playlistText += `  4. ${pair.track4.song.artist} - ${pair.track4.song.title}\n`;
+          playlistText += `     Key: ${KEY_NAMES[pair.track4.song.key - 1]}\n\n`;
+        }
+
+        playlistText += '\n';
+      });
+    }
+
+    playlistText += `\n${'='.repeat(60)}\n`;
+    playlistText += `Mixed with KWYJIBO\n`;
+    playlistText += `Quantum-powered Hamiltonian DJ technology\n`;
+
+    // Create and download the text file
+    const blob = new Blob([playlistText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = `${baseFilename}-playlist.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  /**
+   * Set a pre-computed playlist for URL-based playback.
+   */
+  setPrecomputedPlaylist(playlist: TrackPair[]): void {
+    this.precomputedPlaylist = playlist;
+    this.precomputedIndex = 0;
+
+    // Update state with first pair
+    if (playlist.length > 0 && playlist[0]) {
+      this.updateState({
+        key: playlist[0].key,
+        tempo: playlist[0].tempo,
+        currentPair: null,
+        nextPair: playlist[0],
+      });
+    }
+  }
+
+  /**
+   * Get the pre-computed playlist.
+   */
+  getPrecomputedPlaylist(): TrackPair[] | null {
+    return this.precomputedPlaylist;
+  }
+
+  /**
+   * Encode a playlist to URL parameter format.
+   * Format: k1,t1,id1a,id1b,id1c,id1d|k2,t2,id2a,id2b,id2c,id2d|...
+   */
+  encodePlaylistToURL(playlist: TrackPair[]): string {
+    const encoded = playlist.map(pair => {
+      const parts = [
+        pair.key.toString(),
+        pair.tempo.toString(),
+        pair.track1.song.id.toString(),
+        pair.track2.song.id.toString(),
+        pair.track3?.song.id.toString() || '0',
+        pair.track4?.song.id.toString() || '0',
+      ];
+      return parts.join(',');
+    });
+    return encoded.join('|');
+  }
+
+  /**
+   * Decode a playlist from URL parameter format.
+   */
+  async decodePlaylistFromURL(urlParams: string): Promise<TrackPair[]> {
+    const playlist: TrackPair[] = [];
+    const pairs = urlParams.split('|');
+
+    for (const pairStr of pairs) {
+      const parts = pairStr.split(',').map(p => parseInt(p, 10));
+      if (parts.length !== 6) continue;
+
+      const [key, tempo, id1, id2, id3, id4] = parts;
+      if (!key || !tempo || !id1 || !id2) continue;
+
+      // Find songs by ID
+      const song1 = this.songs.find(s => s.id === id1);
+      const song2 = this.songs.find(s => s.id === id2);
+      if (!song1 || !song2) continue;
+
+      const song3 = id3 && id3 !== 0 ? this.songs.find(s => s.id === id3) : undefined;
+      const song4 = id4 && id4 !== 0 ? this.songs.find(s => s.id === id4) : undefined;
+
+      // Calculate related keys for tracks 3 and 4
+      const relatedKey3 = ((key + 4) % 10) + 1 as Key;
+      const relatedKey4 = ((key + 7) % 10) + 1 as Key;
+
+      // Create the pair
+      const pair: TrackPair = {
+        track1: this.createTrack(song1, key as Key, tempo as Tempo),
+        track2: this.createTrack(song2, key as Key, tempo as Tempo),
+        track3: song3 ? this.createTrack(song3, relatedKey3, tempo as Tempo) : undefined,
+        track4: song4 ? this.createTrack(song4, relatedKey4, tempo as Tempo) : undefined,
+        key: key as Key,
+        tempo: tempo as Tempo,
+      };
+
+      playlist.push(pair);
     }
 
     return playlist;

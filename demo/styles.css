@@ -81,13 +81,42 @@ body {
   font-size: 24px;
 }
 
-.ctrl-btn.settings-btn {
+.ctrl-btn.settings-btn,
+.ctrl-btn.record-btn {
   flex: 0 0 auto;
   width: 44px;
   padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.ctrl-btn.recording {
+  background: #f00;
+  border-color: #f00;
+  color: var(--bg);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.ctrl-btn.recording-armed {
+  background: #f80;
+  border-color: #f80;
+  color: var(--bg);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.recording-indicator {
+  color: #f00;
+  font-weight: 600;
+}
+
+.recording-armed-indicator {
+  color: #f80;
+  font-weight: 600;
 }
 
 /* Crossfader - Full Width */
@@ -1235,6 +1264,53 @@ input:focus + .slider {
   color: #1877F2;
 }
 
+/* Complete Mix Modal */
+.complete-mix-modal {
+  max-width: 800px;
+  width: 90vw;
+  max-height: 85vh;
+}
+
+.complete-mix-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.mix-set {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mix-set-header {
+  background: var(--surface);
+  padding: 12px 16px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+}
+
+.mix-tracks {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mix-track {
+  font-size: 13px;
+  padding: 6px 0;
+  color: var(--text);
+}
+
+.mix-track-hidden {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
 /* Mobile Responsiveness */
 @media (max-width: 768px) {
   .user-menu {
@@ -1249,5 +1325,10 @@ input:focus + .slider {
 
   .sign-in-modal h3 {
     font-size: 20px;
+  }
+
+  .complete-mix-modal {
+    width: 95vw;
+    max-height: 90vh;
   }
 }

@@ -40,6 +40,8 @@ function App(): React.ReactElement {
   const [currentTrack, setCurrentTrack] = useState<'intro' | 'main'>('intro');
   const [playHistory, setPlayHistory] = useState<TrackPair[]>([]);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const [hasStartedPlaying, setHasStartedPlaying] = useState(false);
+  const [completeMix, setCompleteMix] = useState<TrackPair[]>([]);
 
   // Update player when enabled songs change
   useEffect(() => {
@@ -48,10 +50,71 @@ function App(): React.ReactElement {
     }
   }, [enabledSongs, player]);
 
-  // Initialize player with quantum randomness
+  // Initialize player and generate playlist
   useEffect(() => {
-    void player.init();
+    const initializePlayerAndPlaylist = async (): Promise<void> => {
+      // First, initialize player with quantum randomness (randomizes starting key/tempo)
+      await player.init();
+
+      // Then handle URL-based playlist
+      const urlParams = new URLSearchParams(window.location.search);
+      const playlistParam = urlParams.get('playlist');
+
+      if (playlistParam) {
+        // Decode and load playlist from URL
+        try {
+          const decodedPlaylist = await player.decodePlaylistFromURL(playlistParam);
+          player.setPrecomputedPlaylist(decodedPlaylist);
+          setCompleteMix(decodedPlaylist);
+        } catch (err) {
+          // Failed to decode, generate new one
+          const newMix = await player.generateCompleteMix();
+          player.setPrecomputedPlaylist(newMix);
+          setCompleteMix(newMix);
+
+          // Update URL with new playlist
+          const encoded = player.encodePlaylistToURL(newMix);
+          const newUrl = `${window.location.pathname}?playlist=${encoded}`;
+          window.history.replaceState({}, '', newUrl);
+        }
+      } else {
+        // No playlist in URL, generate and encode one
+        const newMix = await player.generateCompleteMix();
+        player.setPrecomputedPlaylist(newMix);
+        setCompleteMix(newMix);
+
+        // Update URL with playlist
+        const encoded = player.encodePlaylistToURL(newMix);
+        const newUrl = `${window.location.pathname}?playlist=${encoded}`;
+        window.history.replaceState({}, '', newUrl);
+      }
+    };
+
+    void initializePlayerAndPlaylist();
   }, [player]);
+
+  // Listen for playlist regeneration events
+  useEffect(() => {
+    const handlePlaylistRegenerated = (event: Event): void => {
+      const customEvent = event as CustomEvent<{
+        playlist: TrackPair[];
+        encodedPlaylist: string;
+      }>;
+
+      // Update state with new playlist
+      setCompleteMix(customEvent.detail.playlist);
+
+      // Update URL with new playlist
+      const newUrl = `${window.location.pathname}?playlist=${customEvent.detail.encodedPlaylist}`;
+      window.history.replaceState({}, '', newUrl);
+    };
+
+    window.addEventListener('playlist-regenerated', handlePlaylistRegenerated);
+
+    return (): void => {
+      window.removeEventListener('playlist-regenerated', handlePlaylistRegenerated);
+    };
+  }, []);
 
   // Wake Lock functionality
   useEffect(() => {
@@ -121,6 +184,7 @@ function App(): React.ReactElement {
   }, [player]);
 
   const handlePlay = (): void => {
+    setHasStartedPlaying(true);
     void player.play();
   };
 
@@ -132,12 +196,40 @@ function App(): React.ReactElement {
     player.stop();
   };
 
-  const handleKeyChange = (key: Key): void => {
-    player.setKey(key);
+  const handleKeyChange = async (key: Key): Promise<void> => {
+    if (!hasStartedPlaying) {
+      // Before playback starts, regenerate playlist from this key
+      player.setKey(key);
+      const newMix = await player.generateCompleteMix();
+      player.setPrecomputedPlaylist(newMix);
+      setCompleteMix(newMix);
+
+      // Update URL with new playlist
+      const encoded = player.encodePlaylistToURL(newMix);
+      const newUrl = `${window.location.pathname}?playlist=${encoded}`;
+      window.history.replaceState({}, '', newUrl);
+    } else {
+      // During playback, just change the key
+      player.setKey(key);
+    }
   };
 
-  const handleTempoChange = (tempo: Tempo): void => {
-    player.setTempo(tempo);
+  const handleTempoChange = async (tempo: Tempo): Promise<void> => {
+    if (!hasStartedPlaying) {
+      // Before playback starts, regenerate playlist from this tempo
+      player.setTempo(tempo);
+      const newMix = await player.generateCompleteMix();
+      player.setPrecomputedPlaylist(newMix);
+      setCompleteMix(newMix);
+
+      // Update URL with new playlist
+      const encoded = player.encodePlaylistToURL(newMix);
+      const newUrl = `${window.location.pathname}?playlist=${encoded}`;
+      window.history.replaceState({}, '', newUrl);
+    } else {
+      // During playback, just change the tempo
+      player.setTempo(tempo);
+    }
   };
 
   const handleMannieFreshToggle = (): void => {
@@ -187,10 +279,41 @@ function App(): React.ReactElement {
     setShowSettings(true);
   };
 
+  const handleRecordToggle = (): void => {
+    if (playerState.isRecordingActive) {
+      player.stopRecording();
+    } else if (playerState.isRecordingArmed) {
+      player.disarmRecording();
+    } else {
+      player.armRecording();
+    }
+  };
+
+  const formatRecordingTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
   return (
     <div className="app">
       {/* Playback Controls - Top */}
       <div className="controls">
+        {(!hasStartedPlaying || playerState.isRecordingArmed || playerState.isRecordingActive) && (
+          <button
+            className={`ctrl-btn record-btn ${playerState.isRecordingActive ? 'recording' : ''} ${playerState.isRecordingArmed && !playerState.isRecordingActive ? 'recording-armed' : ''}`}
+            onClick={handleRecordToggle}
+            title={
+              playerState.isRecordingActive
+                ? 'Stop Recording'
+                : playerState.isRecordingArmed
+                  ? 'Cancel Recording'
+                  : 'Arm Recording'
+            }
+          >
+            ⏺
+          </button>
+        )}
         {!playerState.isPlaying ? (
           <button className="ctrl-btn play" onClick={handlePlay}>▶︎</button>
         ) : (
@@ -207,6 +330,12 @@ function App(): React.ReactElement {
         <span>{KEY_NAMES[playerState.key - 1]}</span>
         <span>{playerState.tempo} BPM</span>
         <span>{currentTrack === 'intro' ? 'Intro' : 'Main'}</span>
+        {playerState.isRecordingActive && (
+          <span className="recording-indicator">⏺ {formatRecordingTime(playerState.recordingDuration)}</span>
+        )}
+        {playerState.isRecordingArmed && !playerState.isRecordingActive && (
+          <span className="recording-armed-indicator">⏺ ARMED</span>
+        )}
       </div>
 
       {/* Key Strip */}
@@ -312,38 +441,40 @@ function App(): React.ReactElement {
         </div>
       )}
 
-      {/* Up Next */}
-      {playerState.nextPair && (
-        <div className="track-section">
-          <div className="section-label">UP NEXT</div>
-          <div className="track-row compact">
-            <div className="track-num">1</div>
-            <div className="track-info-compact">
-              {playerState.nextPair.track1.song.artist} - {playerState.nextPair.track1.song.title}
+      {/* Complete Playlist */}
+      {completeMix.length > 0 && (
+        <div className="playlist-container">
+          <div className="playlist-section">
+            <div className="section-label played-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '12px', paddingRight: '12px' }}>
+              <span>PLAYLIST ({completeMix.length} {completeMix.length === 1 ? 'SET' : 'SETS'})</span>
             </div>
-          </div>
-          <div className="track-row compact">
-            <div className="track-num">2</div>
-            <div className="track-info-compact">
-              {playerState.nextPair.track2.song.artist} - {playerState.nextPair.track2.song.title}
-            </div>
-          </div>
-          {playerState.nextPair.track3 && (
-            <div className="track-row compact">
-              <div className="track-num">3</div>
-              <div className="track-info-compact">
-                {playerState.nextPair.track3.song.artist} - {playerState.nextPair.track3.song.title}
+            {completeMix.map((pair, idx) => (
+              <div key={`playlist-${idx}`} className="playlist-pair played">
+                <div className="pair-meta">
+                  <span className="pair-key">{KEY_NAMES[pair.key - 1]}</span>
+                  <span className="pair-tempo">{pair.tempo}</span>
+                </div>
+                <div className="pair-tracks">
+                  <div className="playlist-track">
+                    1. {pair.track1.song.artist} - {pair.track1.song.title}
+                  </div>
+                  <div className="playlist-track">
+                    2. {pair.track2.song.artist} - {pair.track2.song.title}
+                  </div>
+                  {pair.track3 && (
+                    <div className="playlist-track">
+                      3. {pair.track3.song.artist} - {pair.track3.song.title}
+                    </div>
+                  )}
+                  {pair.track4 && (
+                    <div className="playlist-track">
+                      4. {pair.track4.song.artist} - {pair.track4.song.title}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
-          {playerState.nextPair.track4 && (
-            <div className="track-row compact">
-              <div className="track-num">4</div>
-              <div className="track-info-compact">
-                {playerState.nextPair.track4.song.artist} - {playerState.nextPair.track4.song.title}
-              </div>
-            </div>
-          )}
+            ))}
+          </div>
         </div>
       )}
 
